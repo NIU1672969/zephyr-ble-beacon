@@ -1,0 +1,19 @@
+/ {
+    dht11 {
+        compatible = "aosong,dht";
+        status = "okay";
+        dio-gpios = <&gpio0 3 GPIO_ACTIVE_HIGH>;
+        label = "DHT11";
+    };
+};
+
+&i2c0 {
+    status = "okay";
+    scl-pin = <29>;
+    sda-pin = <28>;
+    clock-frequency = <I2C_BITRATE_STANDARD>;
+    gas_sensor: gas_sensor@4 {
+        compatible = "seeed,multichannel-gas";
+        reg = <0x04>;
+    };
+};
