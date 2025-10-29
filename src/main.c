@@ -6,32 +6,31 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+
+#include <kernel.h>
+#include <device.h>
 #include <zephyr/types.h>
 #include <stddef.h>
 #include <sys/printk.h>
 #include <sys/util.h>
-#include <device.h>
+
+#include <string.h>
+#include <stdio.h>
 
 #include <drivers/sensor.h>
 
 //Include sensor gas
 #include <drivers/i2c.h>
 #include <logging/log.h>
+#include <bluetooth/hci.h>
 
 #include <zephyr.h>
 
 #include <bluetooth/bluetooth.h>
 #include <bluetooth/hci.h>
 
-//Sensor gas
-LOG_MODULE_REGISTER(gas_sensor, LOG_LEVEL_INF);
-
 #define DEVICE_NAME CONFIG_BT_DEVICE_NAME
 #define DEVICE_NAME_LEN (sizeof(DEVICE_NAME) - 1)
-
-//Sensor gas
-#define I2C_NODE DT_NODELABEL(i2c0)
-#define GAS_SENSOR_ADDR 0x04
 
 /*
  * Set Advertisement data. Based on the Eddystone specification:
@@ -90,105 +89,78 @@ static void bt_ready(int err)
 	printk("Beacon started, advertising as %s\n", addr_s);
 }
 
-static void read_sensor(void)
+
+//Sensor gas
+LOG_MODULE_REGISTER(gas_sensor, LOG_LEVEL_INF);
+
+#define I2C_NODE DT_NODELABEL(i2c0)
+#define GAS_SENSOR_ADDR 0x04
+
+/* Register map from Seeed/Arduino source */
+#define GAS_CO_REG      0x02
+#define GAS_NO2_REG     0x04
+#define GAS_NH3_REG     0x06
+#define GAS_CH4_REG     0x08
+#define GAS_C2H5OH_REG  0x0A
+#define GAS_H2_REG      0x0C   /* optional if supported */
+#define GAS_PROPANE_REG 0x0E   /* optional if supported */
+
+#define GAS_SCALE 100.0f  /* raw / scale => ppm */
+
+static float read_gas(const struct device *i2c_dev, uint8_t reg)
 {
-    const struct device *dht = DEVICE_DT_GET_ONE(aosong_dht);
-    struct sensor_value temp, humidity;
-    int ret;
-
-    if (!dht) {
-        printk("Error: Could not get DHT device\n");
-        return;
+    uint8_t buf[2];
+    int ret = i2c_write_read(i2c_dev, GAS_SENSOR_ADDR, &reg, 1, buf, sizeof(buf));
+    if (ret) {
+        printk("I2C read failed reg 0x%02x (err %d)\n", reg, ret);
+        return -1.0f;
     }
-
-    if (!device_is_ready(dht)) {
-        printk("Error: Device %s is not ready\n", dht->name);
-        return;
-    }
-
-    printk("Attempting to read DHT11 sensor...\n");
-    ret = sensor_sample_fetch(dht);
-    if (ret < 0) {
-        printk("Error: Sensor sample fetch failed (err %d)\n", ret);
-        return;
-    }
-
-    ret = sensor_channel_get(dht, SENSOR_CHAN_AMBIENT_TEMP, &temp);
-    if (ret < 0) {
-        printk("Error: Could not get temperature (err %d)\n", ret);
-        return;
-    }
-
-    ret = sensor_channel_get(dht, SENSOR_CHAN_HUMIDITY, &humidity);
-    if (ret < 0) {
-        printk("Error: Could not get humidity (err %d)\n", ret);
-        return;
-    }
-
-    printk("Temperature: %d.%d °C\n", temp.val1, temp.val2 / 100000);
-    printk("Humidity: %d.%d %%\n", humidity.val1, humidity.val2 / 100000);
+    uint16_t raw = ((uint16_t)buf[0] << 8) | buf[1];
+    return (float)raw / GAS_SCALE;
 }
 
-/* Read CO from the gas sensor over I2C.
- * NOTE: The register address and scaling below are placeholders —
- * check your sensor's datasheet and adjust GAS_CO_REG and CO_SCALE
- * accordingly. This implementation reads 2 bytes (MSB first) and
- * converts to a 16-bit value.
- */
-#define GAS_CO_REG 0x02
-#define CO_SCALE 100.0f /* placeholder: raw / CO_SCALE => ppm */
-
-static void read_co_sensor(const struct device *i2c_dev)
+static void read_all_gases(const struct device *i2c_dev)
 {
-    if (!i2c_dev) {
-        printk("CO: invalid i2c device\n");
-        return;
-    }
+    float co   = read_gas(i2c_dev, GAS_CO_REG);
+    float no2  = read_gas(i2c_dev, GAS_NO2_REG);
+    float nh3  = read_gas(i2c_dev, GAS_NH3_REG);
+    float ch4  = read_gas(i2c_dev, GAS_CH4_REG);
+    float etoh = read_gas(i2c_dev, GAS_C2H5OH_REG);
 
-    uint8_t reg = GAS_CO_REG;
-    uint8_t buf[2];
-    int ret;
+    /* Use integer print to avoid float formatting */
+    uint16_t co_i   = (uint16_t)(co   * 100);
+    uint16_t no2_i  = (uint16_t)(no2  * 100);
+    uint16_t nh3_i  = (uint16_t)(nh3  * 100);
+    uint16_t ch4_i  = (uint16_t)(ch4  * 100);
+    uint16_t etoh_i = (uint16_t)(etoh * 100);
 
-    /* Write register address, then read 2 bytes */
-    ret = i2c_write_read(i2c_dev, GAS_SENSOR_ADDR, &reg, 1, buf, sizeof(buf));
-    if (ret) {
-        printk("CO: read failed (err %d)\n", ret);
-        return;
-    }
-
-    uint16_t raw = ((uint16_t)buf[0] << 8) | buf[1];
-    float ppm = (float)raw / CO_SCALE;
-
-    /* Opción 2: printk con enteros (para mostrar decimales sin float) */
-    uint16_t ppm_int = (uint16_t)(ppm * 100); // 2 decimales
-    printk("CO raw=0x%04x, approx=%u.%02u ppm\n",
-           raw, ppm_int / 100, ppm_int % 100);
+    printk("CO:%u.%02u NO2:%u.%02u NH3:%u.%02u CH4:%u.%02u C2H5OH:%u.%02u ppm\n",
+           co_i/100,   co_i%100,
+           no2_i/100,  no2_i%100,
+           nh3_i/100,  nh3_i%100,
+           ch4_i/100,  ch4_i%100,
+           etoh_i/100, etoh_i%100);
 }
 
 void main(void)
 {
-    int err;
-
-    printk("Starting Beacon Demo with DHT11\n");
-
-    /* Initialize the Bluetooth Subsystem */
-    err = bt_enable(bt_ready);
-    if (err) {
-        printk("Bluetooth init failed (err %d)\n", err);
+    printk("Starting Multichannel Gas Sensor (register mode)\n");
+    int err; printk("Starting Beacon Demo with DHT11\n");
+     /* Initialize the Bluetooth Subsystem */ err = bt_enable(bt_ready); 
+     if (err) { 
+        printk("Bluetooth init failed (err %d)\n", err); 
     }
 
     const struct device *i2c_dev = DEVICE_DT_GET(I2C_NODE);
+    if (!device_is_ready(i2c_dev)) {
+        printk("I2C device not ready\n");
+        return;
+    }
 
-    /* Per user request: remove the I2C scan and instead call the
-     * CO-reading helper repeatedly. We intentionally don't abort if
-     * the I2C device isn't ready here — the read_co_sensor function
-     * will report errors. This keeps behavior simple and matches the
-     * requested change.
-     */
-    printk("\n=== Starting CO readings (no I2C scan) ===\n");
+    k_sleep(K_SECONDS(1));  /* allow sensor MCU to boot */
 
     while (1) {
-        read_co_sensor(i2c_dev);
+        read_all_gases(i2c_dev);
         k_sleep(K_SECONDS(2));
     }
 }

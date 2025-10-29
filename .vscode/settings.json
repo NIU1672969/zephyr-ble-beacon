@@ -1,0 +1,8 @@
+{
+    "files.associations": {
+        "device.h": "c",
+        "types.h": "c",
+        "util.h": "c",
+        "printk.h": "c"
+    }
+}
