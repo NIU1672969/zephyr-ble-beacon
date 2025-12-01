@@ -35,6 +35,8 @@
 #include <bluetooth/uuid.h>
 /* ----------------------------- */
 
+#include "temp_humi.h"
+
 
 #define DEVICE_NAME CONFIG_BT_DEVICE_NAME
 #define DEVICE_NAME_LEN (sizeof(DEVICE_NAME) - 1)
@@ -164,6 +166,17 @@ static void bt_ready(int err)
 	printk("Advertising started, connectable as %s\n", addr_s);
 }
 
+/* Simple helper used by temp_humi module to forward notifications. */
+int my_sensor_notify_string(const char *s)
+{
+	if (!s) return -EINVAL;
+	printk("temp_humi: %s\n", s);
+	/* For now, we simply log the string. If you want this over BLE,
+	 * implement a separate characteristic and use bt_gatt_notify here.
+	 */
+	return 0;
+}
+
 
 /* Sensor gas code (from your original file) */
 LOG_MODULE_REGISTER(gas_sensor, LOG_LEVEL_INF);
@@ -229,12 +242,49 @@ static void read_all_gases(const struct device *i2c_dev)
 	float_to_bytes(etoh, &sensor_data_buffer[16]); /* Bytes 16-19 */
 
 	/* --- NEW: Send notification if connected --- */
-	if (current_conn) {
-		bt_gatt_notify(current_conn,
-			       &gas_sensor_service.attrs[1], /* The characteristic attribute */
-			       sensor_data_buffer,
-			       sizeof(sensor_data_buffer));
+	bluetooth_gas_notify(sensor_data_buffer, sizeof(sensor_data_buffer));
+}
+
+/* --- DHT11 Sensor read function --- */
+static int read_dht11(void)
+{
+	const struct device *dht = device_get_binding("DHT11");
+	if (!dht) {
+		printk("DHT11 device not found\n");
+		return -1;
 	}
+
+	struct sensor_value temp_val;
+	struct sensor_value hum_val;
+
+	if (sensor_sample_fetch(dht) < 0) {
+		printk("DHT11: sensor_sample_fetch failed\n");
+		return -1;
+	}
+
+	if (sensor_channel_get(dht, SENSOR_CHAN_AMBIENT_TEMP, &temp_val) < 0) {
+		printk("DHT11: failed to get temperature channel\n");
+		return -1;
+	}
+
+	if (sensor_channel_get(dht, SENSOR_CHAN_HUMIDITY, &hum_val) < 0) {
+		printk("DHT11: failed to get humidity channel\n");
+		return -1;
+	}
+
+	/* Convert to float: val1 + val2/1e6 (val2 is micro units) */
+	float temp = (float)temp_val.val1 + (float)temp_val.val2 / 1000000.0f;
+	float hum  = (float)hum_val.val1  + (float)hum_val.val2  / 1000000.0f;
+
+	/* Print as fixed-point (two decimals) similar to other prints */
+	int temp_i = (int)(temp * 100.0f);
+	int hum_i  = (int)(hum  * 100.0f);
+
+	printk("DHT11 -> Temp: %d.%02d C  Hum: %d.%02d %%\n",
+		   temp_i/100, temp_i%100,
+		   hum_i/100,  hum_i%100);
+
+	return 0;
 }
 
 void main(void)
@@ -259,6 +309,16 @@ void main(void)
 	}
 
 	k_sleep(K_SECONDS(1));   /* allow sensor MCU to boot */
+
+	/* Start DHT11 notify thread (spawns the temp_humi task) */
+	{
+		K_THREAD_STACK_DEFINE(temp_humi_stack, 1024);
+		static struct k_thread temp_humi_tid;
+		(void)k_thread_create(&temp_humi_tid, temp_humi_stack,
+							  K_THREAD_STACK_SIZEOF(temp_humi_stack),
+							  dht11_notify_thread, NULL, NULL, NULL,
+							  K_PRIO_COOP(8), 0, K_NO_WAIT);
+	}
 
 	while (1) {
 		read_all_gases(i2c_dev);

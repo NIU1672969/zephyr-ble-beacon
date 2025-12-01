@@ -1,9 +1,13 @@
 / {
-    dht11 {
-        compatible = "aosong,dht";
-        status = "okay";
-        dio-gpios = <&gpio0 3 GPIO_ACTIVE_HIGH>;
+    dht11_0: dht11@0 {
+        compatible = "worldsemi,dht11";
         label = "DHT11";
+        status = "okay";
+        gpios = <&gpio0 11 GPIO_ACTIVE_HIGH>; /* DATA pin is connected to P0.11 */
+    };
+
+    aliases {
+        dht11 = &dht11_0;
     };
 };
 
